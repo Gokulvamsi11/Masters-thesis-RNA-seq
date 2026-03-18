@@ -7,8 +7,529 @@ This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute
 
 Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
 
+### Install and Load packages 
 ```{r}
 source("microarray_packages.R")
+```
+
+### Importing Normalised Data 
+```{r}
+gse <- getGEO("GSE25504", GSEMatrix = TRUE)
+```
+```{r}
+names(gse)
+sapply(gse, function(x) ncol(exprs(x)))
+```
+Total 170 samples analysed in 4 different platforms, for training the model we are using -"GPL6947	Illumina HumanHT-12 V3.0 expression beadchip" as mentioned in the original papers - PMID: 25120092 and PMID: 26484146
+
+```{r}
+sampleinfo <- pData(gse[[4]])
+feature_data <- fData(gse[[4]])
+expr_matrix <- exprs(gse[[4]])
+dim(expr_matrix)
+```
+
+```{r}
+summary(as.vector(expr_matrix))
+```
+The expression matrix checked with QC -> RSN normalisation and quality control steps applied  
+```{r}
+#Check for any duplicated data 
+list(
+  dim = dim(expr_matrix),
+  duplicated_rows = sum(duplicated(expr_matrix)),
+  duplicated_cols = sum(duplicated(t(expr_matrix))),
+  duplicated_rownames = sum(duplicated(rownames(expr_matrix))),
+  duplicated_colnames = sum(duplicated(colnames(expr_matrix)))
+)
+```
+
+### Exploratory Data Analysis 
+```{r}
+#To visualise IQR - middle 50% of data spread, removing extreme outlier ends of data - QC
+boxplot(expr_matrix, outline = FALSE, las = 2)
+```
+```{r}
+# Convert expression matrix to long format
+expr_viol <- expr_matrix %>%
+  as_tibble(rownames = "Gene") %>%
+  pivot_longer(-Gene, names_to = "Sample", values_to = "Value")
+
+# Create sample chunks (3–4 panels)
+n_samples <- length(unique(expr_viol$Sample))
+n_chunks <- 4 #no of panels
+chunk_size <- ceiling(n_samples / n_chunks)
+
+expr_viol <- expr_viol %>%
+  mutate(chunk = rep(1:n_chunks, each = chunk_size, length.out = n_samples)[match(Sample, unique(Sample))])
+
+expr_viol$chunk <- factor(expr_viol$chunk)
+
+# Violin plots, one panel per chunk
+ggplot(expr_viol, aes(x = Sample, y = Value)) +
+  geom_violin(alpha = 0.5, fill = "skyblue") +
+  geom_point(data = expr_viol %>% sample_frac(0.1), 
+             alpha = 0.05, 
+             position = position_jitter(seed = 1, width = 0.2)) +
+  facet_wrap(~chunk, scales = "free_x") +  # separate plots for each chunk
+  theme(legend.position = "none") +
+  xlab("") +
+  ylab("log2(mRNA fluorescence intensity)") +
+  ggtitle("mRNA probe intensity distribution of all the samples") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+### Post-QC data preprocessing
+```{r}
+# --- Filtering pipeline -----------
+
+# 1) Remove low-variance probes (bottom 20%)
+gene_var <- apply(expr_matrix, 1, var, na.rm = TRUE)
+var_threshold <- quantile(gene_var, 0.2, na.rm = TRUE)
+keep_var <- gene_var > var_threshold
+expr_var_filtered <- expr_matrix[keep_var, ]
+
+cat("After variance filtering:", dim(expr_var_filtered), "\n")
+# --- Build probe annotation table ---
+# FROM FEATURE DATA
+# probe_annotation <- data.frame(
+#   ProbeID = rownames(feature_data),
+#   GeneSymbol = feature_data[["Symbol"]])
+
+# Suppose your probe IDs are rownames of your expression matrix
+probe_ids <- rownames(expr_var_filtered)  
+
+# Map probe IDs to gene symbols using org.Hs.eg.db
+# Adjust 'keytype' to your platform, e.g., "PROBEID" for Affymetrix, "ENSEMBL" for Ensembl IDs
+# Map to gene symbols
+gene_symbols <- mapIds(illuminaHumanv4.db,
+                       keys = probe_ids,
+                       column = "SYMBOL",   # gene symbol
+                       keytype = "PROBEID",
+                       multiVals = "first")  # take first if multiple mapping
+
+# Create probe_annotation data frame
+probe_annotation <- data.frame(
+  ProbeID = probe_ids,
+  GeneSymbol = gene_symbols,
+  stringsAsFactors = FALSE
+)
+# 2) Remove unannotated probes: 16k
+keep_annot <- !is.na(probe_annotation$GeneSymbol[match(rownames(expr_var_filtered),
+                                                       probe_annotation$ProbeID)])
+expr_anno <- expr_var_filtered[keep_annot, ]
+
+cat("After removing unannotated probes:", dim(expr_anno), "\n")
+
+# 3) Collapse duplicates by max expression: 11k
+expr_collapsed <- expr_var_filtered %>%
+  as.data.frame() %>%
+  mutate(
+    ProbeID = rownames(.),
+    GeneSymbol = probe_annotation$GeneSymbol[match(ProbeID, probe_annotation$ProbeID)],
+    # Use GeneSymbol if available, otherwise fallback to ProbeID
+    GeneSymbol_final = ifelse(is.na(GeneSymbol) | GeneSymbol == "",
+                              ProbeID,
+                              GeneSymbol)
+  ) %>%
+  group_by(GeneSymbol_final) %>%
+  summarise(across(where(is.numeric), max, na.rm = TRUE)) %>%
+  column_to_rownames("GeneSymbol_final")
+cat("After adjusting for multiple probes to gene matching:", dim(expr_collapsed), "\n")
+# 4) CV filtering 
+# Linearize
+expr_linear <- 2^expr_collapsed
+
+# Compute CV per gene
+cv <- apply(expr_linear, 1, sd) / apply(expr_linear, 1, mean)
+
+# Filter genes with CV > 0.1
+filtered_genes <- expr_collapsed[cv > 0.1, ]  # Keep log2 values for downstream
+
+cat("After relative variance filtering:", dim(filtered_genes), "\n")
+```
+### Creating new sample subset with interested factors  
+```{r}
+sampleinfo_new <- sampleinfo %>% 
+  select(title, characteristics_ch1, characteristics_ch1.1, characteristics_ch1.3, characteristics_ch1.6, characteristics_ch1.7,characteristics_ch1.4, `other positive results:ch1`) %>%
+  extract(
+    col = characteristics_ch1.6, 
+    into = c("Gestation_weeks", "Neonate_days"),
+    regex = ".*: (\\d+)\\+(\\d+)$",
+    convert = TRUE, 
+    remove = TRUE
+  ) %>% rename(other_indications = `other positive results:ch1`) %>% 
+  rename(blood_test_results = characteristics_ch1.4) %>% 
+  rename(disease_status = characteristics_ch1) %>%
+  mutate(disease_status = sub("^neonate: ", "", disease_status)) %>%
+  rename(gender = characteristics_ch1.1) %>%
+  mutate(gender = sub("^gender: ", "", gender)) %>%
+  rename(Antibiotics = characteristics_ch1.3) %>%
+  mutate(Antibiotics = sub("^on antibiotics at time of sample: ", "", Antibiotics)) %>%
+  rename(Birthweight = characteristics_ch1.7) %>%
+  mutate(Birthweight = sub("^birthweight \\(g\\):\\s*", "", Birthweight)) 
+str(sampleinfo_new)  
+```
+
+```{r}
+# Define the GSM IDs you want to keep as "infected"
+specific_infected <- c("Inf009", "Inf047", "Inf075")
+
+sampleinfo_new <- sampleinfo_new %>%
+  mutate(disease_status = case_when(
+    sampleinfo_new$title %in% specific_infected ~ "other_infected",  # specific GSMs
+    TRUE ~ disease_status                                     # keep everything else as is
+  ))
+```
+
+```{r}
+sampleinfo_new <- sampleinfo_new %>% 
+  select(title, disease_status, Gestation_weeks, Neonate_days, Birthweight, gender, Antibiotics, blood_test_results, other_indications) %>%
+  mutate(
+    disease_status = factor(disease_status),
+    Antibiotics = factor(Antibiotics),
+    gender = factor(gender),
+    Birthweight = as.numeric(Birthweight),
+    Gestation_weeks = as.numeric(Gestation_weeks),
+    Neonate_days = as.numeric(Neonate_days),
+    # Create binary columns
+    Term = factor(ifelse(Gestation_weeks >= 37, "term", "preterm")),
+    Weight = factor(ifelse(Birthweight > 2500, "NBW", "LBW")),
+    Corrected_GA = Gestation_weeks + (Neonate_days/7), 
+  )
+sampleinfo_new <- sampleinfo_new %>%
+  mutate(Weight_robust = case_when(
+    Birthweight < 1500 ~ "VLBW",                       # Very low birth weight
+    Birthweight >= 1500 & Birthweight < 2500 ~ "LBW",  # Low birth weight
+    Birthweight >= 2500 ~ "NBW",                       # Normal birth weight
+    TRUE ~ NA_character_                                # catch any missing or unexpected values
+  ))
+
+str(sampleinfo_new) 
+```
+### sample data visualisation
+
+```{r}
+# Create a matrix of counts
+df_matrix <- sampleinfo_new %>%
+  group_by(disease_status, Term, Weight) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = Weight, values_from = count, values_fill = 0)  # columns = Weights
+
+# Convert to matrix for clustering
+mat <- as.matrix(df_matrix[,-c(1:2)])  # remove disease_status & Term columns
+rownames(mat) <- paste(df_matrix$disease_status, df_matrix$Term, sep = "_")
+
+mat
+
+pheatmap(mat,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         display_numbers = TRUE,     # show counts in cells
+         main = "Distribution of Samples with respect to GA, BW, disease status",
+         color = colorRampPalette(c("white", "skyblue", "steelblue"))(50))
+```
+
+### Unsupervised PCA Analysis
+
+```{r}
+# PCA
+pca <- prcomp(t(filtered_genes), scale. = TRUE)
+
+# Compute variance explained
+var_explained <- pca$sdev^2 / sum(pca$sdev^2) * 100
+
+sum(var_explained[1:3])
+# Disease status - Plot PC1 vs PC2 with % variance
+plot(pca$x[,1], pca$x[,2],
+     col = sampleinfo_new$disease_status,
+     pch = 16,
+     xlab = paste0("PC1 (", round(var_explained[1], 1), "%)"),
+     ylab = paste0("PC2 (", round(var_explained[2], 1), "%)"),
+     main = "PCA of samples with genes CV > 0.1")
+legend("topright", legend = levels(sampleinfo_new$disease_status), col = 1:length(levels(sampleinfo_new$disease_status)), pch=16)
+```
+```{r}
+# --- Scree plot ---
+# Base R version
+plot(var_explained, type = "b", pch = 19,
+     xlab = "Principal Component",
+     ylab = "Variance Explained (%)",
+     main = "Scree Plot")
+abline(h=5, col="gray", lty=2)
+
+```
+### Differentially Expression analysis
+
+```{r}
+design <- model.matrix(~ 0 + disease_status, data = sampleinfo_new)
+colnames(design) <- levels(sampleinfo_new$disease_status)
+# design
+colnames(design)
+```
+
+```{r}
+fit <- lmFit(filtered_genes, design)
+contrast.matrix <- makeContrasts(infected - control, levels = design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+```
+
+```{r}
+top_genes <- topTable(fit2, number = Inf, adjust.method = "BH")
+head(top_genes)
+```
+```{r}
+sum(top_genes$adj.P.Val <= 0.01)
+sum(top_genes$adj.P.Val <= 0.01 & abs(top_genes$logFC) >= 1)
+sig_genes <- top_genes %>% filter(adj.P.Val <= 0.01 & abs(logFC) >= 1) 
+```
+
+
+### PCA Analysis after Statistical testing
+
+```{r}
+# PCA
+pca <- prcomp(t(filtered_genes[rownames(sig_genes), ]), scale. = TRUE)
+
+# Compute variance explained
+var_explained <- pca$sdev^2 / sum(pca$sdev^2) * 100
+
+sum(var_explained[1:3])
+
+# Disease status - Plot PC1 vs PC2 with % variance
+plot(pca$x[,1], pca$x[,2],
+     col = sampleinfo_new$disease_status,
+     pch = 16,
+     xlab = paste0("PC1 (", round(var_explained[1], 1), "%)"),
+     ylab = paste0("PC2 (", round(var_explained[2], 1), "%)"),
+     main = "Supervised PCA after P-value cutoff")
+legend("bottomleft", legend = levels(sampleinfo_new$disease_status), col = 1:length(levels(sampleinfo_new$disease_status)), pch=16)
+```
+
+```{r}
+# Removing viral infection sample - GSM627045
+filtered_genes <- filtered_genes[, colnames(filtered_genes) != "GSM627045"]
+sampleinfo_new <- sampleinfo_new[rownames(sampleinfo_new) != "GSM627045", ]
+```
+
+```{r}
+# PCA
+pca <- prcomp(t(filtered_genes[rownames(sig_genes), ]), scale. = TRUE)
+
+# Compute variance explained
+var_explained <- pca$sdev^2 / sum(pca$sdev^2) * 100
+
+sum(var_explained[1:3])
+# Disease status - Plot PC1 vs PC2 with % variance
+plot(pca$x[,1], pca$x[,2],
+     col = sampleinfo_new$disease_status,
+     pch = 16,
+     xlab = paste0("PC1 (", round(var_explained[1], 1), "%)"),
+     ylab = paste0("PC2 (", round(var_explained[2], 1), "%)"),
+     main = "Supervised PCA after P-value cutoff")
+legend("bottomleft", legend = levels(sampleinfo_new$disease_status), col = 1:length(levels(sampleinfo_new$disease_status)), pch=16)
+```
+### Volcano plot with DE genes filtered by FDR < 0.01 and FC > 2
+
+```{r}
+# Add a column to flag significant genes
+top_genes$Significant <- with(top_genes, adj.P.Val <= 0.01 & abs(logFC) > 1)
+
+# Basic volcano plot
+ggplot(top_genes, aes(x = logFC, y = -log10(adj.P.Val))) +
+  geom_point(aes(color = Significant), alpha = 0.6) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_minimal() +
+  xlab("Log2 Fold Change") +
+  ylab("-Log10 Adjusted P-Value") +
+  ggtitle("Volcano Plot of DE Genes") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed", color = "blue")
+```
+### Heatmap of top significant genes acc to above model
+```{r}
+pheno_subset <- sampleinfo_new %>% dplyr::select(disease_status)
+
+# Define a blue-to-yellow color palette
+my_palette <- colorRampPalette(c("darkblue", "yellow"))(100)
+# Draw heatmap
+pheatmap(filtered_genes[rownames(sig_genes), ],
+         annotation_col = pheno_subset,   # sample annotations
+         labels_col =  sampleinfo_new$title,# custom sample names
+         labels_row = NA,
+         cluster_cols = TRUE,            # keep order of samples
+         cluster_rows = TRUE,           # keep order of genes
+         clustering_distance_rows = "euclidean",
+         clustering_method = "average",
+         fontsize_row = 2,
+         fontsize_col = 8,
+         treeheight_row = 0,              # optional: hide row clustering tree
+         border_color = NA,
+         color = my_palette)             # set custom color                
+```
+### Differentially Expression analysis w.r.t Birthweight 
+
+```{r}
+design_1 <- model.matrix(~ 0+ Birthweight + disease_status, data = sampleinfo_new)
+# design
+colnames(design_1)
+```
+
+```{r}
+fit3 <- lmFit(filtered_genes, design_1)
+contrast.matrix <- makeContrasts(disease_statusinfected - disease_statuscontrol, levels = design_1)
+fit4 <- contrasts.fit(fit3, contrast.matrix)
+fit4 <- eBayes(fit4)
+```
+
+```{r}
+top_genes_BW <- topTable(fit4, number = Inf, adjust.method = "BH")
+head(top_genes_BW)
+```
+```{r}
+sum(top_genes_BW$adj.P.Val <= 0.01)
+sig_genes_BW <- top_genes_BW %>% filter(adj.P.Val <= 0.01 & abs(logFC) >= log2(1.25))
+dim(sig_genes_BW)
+```
+
+### Volcano plot with DE genes filtered w.r.t Birthweight 
+
+```{r}
+# Add a column to flag significant genes
+top_genes_BW$Significant <- with(top_genes_BW, adj.P.Val <= 0.01 & abs(logFC) >= log2(1.25))
+
+# Basic volcano plot
+ggplot(top_genes_BW, aes(x = logFC, y = -log10(adj.P.Val))) +
+  geom_point(aes(color = Significant), alpha = 0.6) +
+  scale_color_manual(values = c("black", "red")) +
+  theme_minimal() +
+  xlab("Log2 Fold Change") +
+  ylab("-Log10 Adjusted P-Value") +
+  ggtitle("Volcano Plot of DE Genes adjusted for Birthweight") +
+  geom_vline(xintercept = c(-log2(1.25), log2(1.25)), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed", color = "blue")
+```
+```{r}
+# Subset samples with disease_status == "infected"
+sampleinfo_infected <- subset(sampleinfo_new, disease_status == "infected")
+# Make sure the column names of filtered_genes match sample IDs
+expr_infected <- filtered_genes[, rownames(sampleinfo_infected)]
+# # Compute correlation (Pearson) of each gene with Birthweight
+# gene_corr <- apply(expr_infected, 1, function(x) cor(x, sampleinfo_infected$Birthweight, method = "pearson"))
+# 
+# # If you want p-values as well
+# gene_pval <- apply(expr_infected, 1, function(x) cor.test(x, sampleinfo_infected$Birthweight)$p.value)
+# 
+# # Combine results in a data frame
+# gene_corr_results <- data.frame(
+#   gene = rownames(expr_infected),
+#   correlation = gene_corr,
+#   p_value = gene_pval
+# # Example: keep correlations with p < 0.05
+# significant_corr <- gene_corr_results[gene_corr_results$p_value < 0.05, ]
+design_2 <- model.matrix(~0 + Birthweight, data = sampleinfo_infected)
+# design
+colnames(design_2)
+```
+
+
+```{r}
+fit5 <- lmFit(expr_infected, design_2)
+# contrast.matrix <- makeContrasts(disease_statusinfected - disease_statuscontrol, levels = design_1)
+# fit4 <- contrasts.fit(fit3, contrast.matrix)
+fit6 <- eBayes(fit5)
+```
+
+```{r}
+top_genes_BW_1 <- topTable(fit6, number = Inf, adjust.method = "BH")
+head(top_genes_BW_1)
+```
+```{r}
+sig_genes_BW_1 <- top_genes_BW_1 %>% filter(adj.P.Val <= 0.01)
+```
+
+#ORA - BW correlation to sepsis population  
+
+```{r}
+sig_genes_ORA <- sig_genes_BW_1
+sig_genes_ORA <- rownames(sig_genes_ORA)
+valid_genes <- sig_genes_ORA[!grepl("^ILMN_", sig_genes_ORA)]
+gene_entrez <- bitr(valid_genes,
+                    fromType = "SYMBOL",
+                    toType = "ENTREZID",
+                    OrgDb = org.Hs.eg.db)
+
+gene_entrez <- gene_entrez$ENTREZID
+```
+
+```{r}
+
+# KEGG pathways
+kegg_res <- enrichKEGG(gene = gene_entrez,
+                       pAdjustMethod="BH",
+                       organism = 'hsa',     # human
+                       pvalueCutoff = 0.05)
+# Reactome pathways
+reactome_res <- enrichPathway(gene = gene_entrez,
+                              organism = "human",
+                              pAdjustMethod="BH",
+                              pvalueCutoff = 0.05,
+                              readable = TRUE)
+go_res <- enrichGO(gene=gene_entrez,
+                   OrgDb=org.Hs.eg.db,
+                   ont="BP",
+                   pAdjustMethod="BH",
+                   pvalueCutoff=0.05,
+                   readable=TRUE)
+```
+
+
+```{r}
+barplot(reactome_res, showCategory=10, title="Top Reactome Pathways in Sepsis correlated to BW")
+barplot(go_res, showCategory=10, title="GO Biological Process Enrichment in Sepsis correlated to BW")
+barplot(kegg_res, showCategory=10, title="Top KEGG Pathways in Sepsis correlated to BW")
+```
+#ORA - DE genes in sepsis adjusted w.r.t BW  
+
+```{r}
+sig_genes_ORA <- sig_genes_BW
+sig_genes_ORA <- rownames(sig_genes_ORA)
+valid_genes <- sig_genes_ORA[!grepl("^ILMN_", sig_genes_ORA)]
+gene_entrez <- bitr(valid_genes,
+                    fromType = "SYMBOL",
+                    toType = "ENTREZID",
+                    OrgDb = org.Hs.eg.db)
+
+gene_entrez <- gene_entrez$ENTREZID
+```
+
+```{r}
+
+# KEGG pathways
+kegg_res <- enrichKEGG(gene = gene_entrez,
+                       pAdjustMethod="BH",
+                       organism = 'hsa',     # human
+                       pvalueCutoff = 0.05)
+# Reactome pathways
+reactome_res <- enrichPathway(gene = gene_entrez,
+                              organism = "human",
+                              pAdjustMethod="BH",
+                              pvalueCutoff = 0.05,
+                              readable = TRUE)
+go_res <- enrichGO(gene=gene_entrez,
+                   OrgDb=org.Hs.eg.db,
+                   ont="BP",
+                   pAdjustMethod="BH",
+                   pvalueCutoff=0.05,
+                   readable=TRUE)
+```
+
+
+```{r}
+barplot(reactome_res, showCategory=10, title="Top Reactome Pathways in Sepsis correlated to BW")
+barplot(go_res, showCategory=10, title="GO Biological Process Enrichment in Sepsis correlated to BW")
+barplot(kegg_res, showCategory=10, title="Top KEGG Pathways in Sepsis correlated to BW")
 ```
 
 Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.

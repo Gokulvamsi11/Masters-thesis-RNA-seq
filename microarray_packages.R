@@ -67,6 +67,7 @@ BiocManager::install(
 BiocManager::install("hta20transcriptcluster.db", ask = FALSE,
                      update = TRUE,
                      force = TRUE)
+
 # -------------------------------
 # Load Libraries
 # -------------------------------
