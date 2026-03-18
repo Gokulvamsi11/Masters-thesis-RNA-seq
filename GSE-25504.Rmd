@@ -415,19 +415,21 @@ ggplot(top_genes_BW, aes(x = logFC, y = -log10(adj.P.Val))) +
 sampleinfo_infected <- subset(sampleinfo_new, disease_status == "infected")
 # Make sure the column names of filtered_genes match sample IDs
 expr_infected <- filtered_genes[, rownames(sampleinfo_infected)]
-# # Compute correlation (Pearson) of each gene with Birthweight
-# gene_corr <- apply(expr_infected, 1, function(x) cor(x, sampleinfo_infected$Birthweight, method = "pearson"))
-# 
-# # If you want p-values as well
-# gene_pval <- apply(expr_infected, 1, function(x) cor.test(x, sampleinfo_infected$Birthweight)$p.value)
-# 
-# # Combine results in a data frame
-# gene_corr_results <- data.frame(
-#   gene = rownames(expr_infected),
-#   correlation = gene_corr,
-#   p_value = gene_pval
-# # Example: keep correlations with p < 0.05
-# significant_corr <- gene_corr_results[gene_corr_results$p_value < 0.05, ]
+
+# Compute correlation (Pearson) of each gene with Birthweight
+gene_corr <- apply(expr_infected, 1, function(x) cor(x, sampleinfo_infected$Birthweight, method = "pearson"))
+
+# If you want p-values as well
+gene_pval <- apply(expr_infected, 1, function(x) cor.test(x, sampleinfo_infected$Birthweight)$p.value)
+
+# Combine results in a data frame
+gene_corr_results <- data.frame(
+  gene = rownames(expr_infected),
+  correlation = gene_corr,
+  p_value = gene_pval)
+# Example: keep correlations with p < 0.05
+significant_corr <- gene_corr_results[gene_corr_results$p_value < 0.05, ]
+
 design_2 <- model.matrix(~0 + Birthweight, data = sampleinfo_infected)
 # design
 colnames(design_2)
@@ -447,6 +449,48 @@ head(top_genes_BW_1)
 ```
 ```{r}
 sig_genes_BW_1 <- top_genes_BW_1 %>% filter(adj.P.Val <= 0.01)
+```
+
+#ORA - BW correlation to sepsis population  
+
+```{r}
+sig_genes_ORA <- significant_corr 
+sig_genes_ORA <- rownames(sig_genes_ORA)
+valid_genes <- sig_genes_ORA[!grepl("^ILMN_", sig_genes_ORA)]
+gene_entrez <- bitr(valid_genes,
+                    fromType = "SYMBOL",
+                    toType = "ENTREZID",
+                    OrgDb = org.Hs.eg.db)
+
+gene_entrez <- gene_entrez$ENTREZID
+```
+
+```{r}
+
+# KEGG pathways
+kegg_res <- enrichKEGG(gene = gene_entrez,
+                       pAdjustMethod="BH",
+                       organism = 'hsa',     # human
+                       pvalueCutoff = 0.05)
+# Reactome pathways
+reactome_res <- enrichPathway(gene = gene_entrez,
+                              organism = "human",
+                              pAdjustMethod="BH",
+                              pvalueCutoff = 0.05,
+                              readable = TRUE)
+go_res <- enrichGO(gene=gene_entrez,
+                   OrgDb=org.Hs.eg.db,
+                   ont="BP",
+                   pAdjustMethod="BH",
+                   pvalueCutoff=0.05,
+                   readable=TRUE)
+```
+
+
+```{r}
+barplot(reactome_res, showCategory=10, title="Top Reactome Pathways in Sepsis correlated to BW")
+barplot(go_res, showCategory=10, title="GO Biological Process Enrichment in Sepsis correlated to BW")
+barplot(kegg_res, showCategory=10, title="Top KEGG Pathways in Sepsis correlated to BW")
 ```
 
 #ORA - BW correlation to sepsis population  
