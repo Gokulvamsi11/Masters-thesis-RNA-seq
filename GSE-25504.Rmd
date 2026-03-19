@@ -146,7 +146,7 @@ cv <- apply(expr_linear, 1, sd) / apply(expr_linear, 1, mean)
 # Filter genes with CV > 0.1
 filtered_genes <- expr_collapsed[cv > 0.1, ]  # Keep log2 values for downstream
 
-cat("After relative variance filtering:", dim(filtered_genes), "\n")
+cat("After CV filtering:", dim(filtered_genes), "\n")
 ```
 ### Creating new sample subset with interested factors  
 ```{r}
@@ -330,7 +330,7 @@ plot(pca$x[,1], pca$x[,2],
      main = "Supervised PCA after P-value cutoff")
 legend("bottomleft", legend = levels(sampleinfo_new$disease_status), col = 1:length(levels(sampleinfo_new$disease_status)), pch=16)
 ```
-### Volcano plot with DE genes filtered by FDR < 0.01 and FC > 2
+### Volcano plot with DE genes in sepsis filtered by FDR < 0.01 and FC > 2
 
 ```{r}
 # Add a column to flag significant genes
@@ -347,7 +347,7 @@ ggplot(top_genes, aes(x = logFC, y = -log10(adj.P.Val))) +
   geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +
   geom_hline(yintercept = -log10(0.01), linetype = "dashed", color = "blue")
 ```
-### Heatmap of top significant genes acc to above model
+### Heatmap of significant DE genes in sepsis 
 ```{r}
 pheno_subset <- sampleinfo_new %>% dplyr::select(disease_status)
 
@@ -368,7 +368,7 @@ pheatmap(filtered_genes[rownames(sig_genes), ],
          border_color = NA,
          color = my_palette)             # set custom color                
 ```
-### Differentially Expression analysis w.r.t Birthweight 
+### Differentially Expression analysis, adjusting for Birthweight 
 
 ```{r}
 design_1 <- model.matrix(~ 0+ Birthweight + disease_status, data = sampleinfo_new)
@@ -393,7 +393,7 @@ sig_genes_BW <- top_genes_BW %>% filter(adj.P.Val <= 0.01 & abs(logFC) >= log2(1
 dim(sig_genes_BW)
 ```
 
-### Volcano plot with DE genes filtered w.r.t Birthweight 
+### Volcano plot with DE genes in sepsis filtered, adjusting for Birthweight 
 
 ```{r}
 # Add a column to flag significant genes
@@ -410,6 +410,7 @@ ggplot(top_genes_BW, aes(x = logFC, y = -log10(adj.P.Val))) +
   geom_vline(xintercept = c(-log2(1.25), log2(1.25)), linetype = "dashed", color = "blue") +
   geom_hline(yintercept = -log10(0.01), linetype = "dashed", color = "blue")
 ```
+### Differentially Expression analysis in infected population only using correlation/linear model with Birthweight 
 ```{r}
 # Subset samples with disease_status == "infected"
 sampleinfo_infected <- subset(sampleinfo_new, disease_status == "infected")
@@ -451,7 +452,7 @@ head(top_genes_BW_1)
 sig_genes_BW_1 <- top_genes_BW_1 %>% filter(adj.P.Val <= 0.01)
 ```
 
-#ORA - BW correlation to sepsis population  
+#Over-Representation Analysis - BW correlation to sepsis population  
 
 ```{r}
 sig_genes_ORA <- significant_corr 
@@ -493,7 +494,7 @@ barplot(go_res, showCategory=10, title="GO Biological Process Enrichment in Seps
 barplot(kegg_res, showCategory=10, title="Top KEGG Pathways in Sepsis correlated to BW")
 ```
 
-#ORA - BW correlation to sepsis population  
+#Over-Representation Analysis - BW linearly correlated to sepsis population  
 
 ```{r}
 sig_genes_ORA <- sig_genes_BW_1
@@ -534,7 +535,7 @@ barplot(reactome_res, showCategory=10, title="Top Reactome Pathways in Sepsis co
 barplot(go_res, showCategory=10, title="GO Biological Process Enrichment in Sepsis correlated to BW")
 barplot(kegg_res, showCategory=10, title="Top KEGG Pathways in Sepsis correlated to BW")
 ```
-#ORA - DE genes in sepsis adjusted w.r.t BW  
+#Over-Representation Analysis - DE genes in sepsis adjusted w.r.t BW  
 
 ```{r}
 sig_genes_ORA <- sig_genes_BW
