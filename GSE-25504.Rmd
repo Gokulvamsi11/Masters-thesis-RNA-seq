@@ -588,7 +588,7 @@ barplot(kegg_res_inf, showCategory=10, title="Top KEGG Pathways in Sepsis popula
 ```
 
 
-#Over-Representation Analysis - BW linearly correlated to healthy population  
+#Over-Representation Analysis - BW linearly correlated to healthy population 
 
 ```{r}
 sig_genes_ORA <- sig_genes_BW_2
