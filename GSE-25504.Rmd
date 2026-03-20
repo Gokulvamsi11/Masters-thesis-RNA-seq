@@ -121,7 +121,7 @@ expr_anno <- expr_var_filtered[keep_annot, ]
 cat("After removing unannotated probes:", dim(expr_anno), "\n")
 
 # 3) Collapse duplicates by max expression: 11k
-expr_collapsed <- expr_var_filtered %>%
+expr_collapsed <- expr_anno %>%
   as.data.frame() %>%
   mutate(
     ProbeID = rownames(.),
