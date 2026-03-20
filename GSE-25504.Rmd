@@ -629,6 +629,9 @@ barplot(reactome_res_con, showCategory=10, title="Top Reactome Pathways in healt
 barplot(go_res_con, showCategory=10, title="GO Biological Process Enrichment in healthy population correlated to BW")
 barplot(kegg_res_con, showCategory=10, title="Top KEGG Pathways in healthy population correlated to BW")
 ```
+```{r}
+print("newline")
+```
 
 
 Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
