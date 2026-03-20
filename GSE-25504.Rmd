@@ -115,10 +115,9 @@ probe_annotation <- data.frame(
   stringsAsFactors = FALSE
 )
 # 2) Remove unannotated probes: 16k
-keep_annot <- !is.na(probe_annotation$GeneSymbol[match(rownames(expr_var_filtered),
-                                                       probe_annotation$ProbeID)])
-expr_anno <- expr_var_filtered[keep_annot, ]
+keep_annot <- !is.na(probe_annotation$GeneSymbol[match(rownames(expr_var_filtered), probe_annotation$ProbeID)]) #Filter out unmatched probes and matched probes with no gene symbol
 
+expr_anno <- expr_var_filtered[keep_annot, ]
 cat("After removing unannotated probes:", dim(expr_anno), "\n")
 
 # 3) Collapse duplicates by max expression: 11k
@@ -135,6 +134,7 @@ expr_collapsed <- expr_anno %>%
   group_by(GeneSymbol_final) %>%
   summarise(across(where(is.numeric), max, na.rm = TRUE)) %>%
   column_to_rownames("GeneSymbol_final")
+
 cat("After adjusting for multiple probes to gene matching:", dim(expr_collapsed), "\n")
 # 4) CV filtering 
 # Linearize
@@ -148,6 +148,10 @@ filtered_genes <- expr_collapsed[cv > 0.1, ]  # Keep log2 values for downstream
 
 cat("After CV filtering:", dim(filtered_genes), "\n")
 ```
+```{r}
+filtered_genes <- filtered_genes[!grepl("^ILMN_", rownames(filtered_genes)), ]
+```
+
 ### Creating new sample subset with interested factors  
 ```{r}
 sampleinfo_new <- sampleinfo %>% 
@@ -197,13 +201,6 @@ sampleinfo_new <- sampleinfo_new %>%
     Weight = factor(ifelse(Birthweight > 2500, "NBW", "LBW")),
     Corrected_GA = Gestation_weeks + (Neonate_days/7), 
   )
-sampleinfo_new <- sampleinfo_new %>%
-  mutate(Weight_robust = case_when(
-    Birthweight < 1500 ~ "VLBW",                       # Very low birth weight
-    Birthweight >= 1500 & Birthweight < 2500 ~ "LBW",  # Low birth weight
-    Birthweight >= 2500 ~ "NBW",                       # Normal birth weight
-    TRUE ~ NA_character_                                # catch any missing or unexpected values
-  ))
 
 str(sampleinfo_new) 
 ```
@@ -285,6 +282,7 @@ fit2 <- eBayes(fit2)
 top_genes <- topTable(fit2, number = Inf, adjust.method = "BH")
 head(top_genes)
 ```
+
 ```{r}
 sum(top_genes$adj.P.Val <= 0.01)
 sum(top_genes$adj.P.Val <= 0.01 & abs(top_genes$logFC) >= log2(1.25))
@@ -337,13 +335,13 @@ legend("topright",
        col = 1:length(levels(sampleinfo_new$Weight_robust)),
        pch = 16)
 ```
-
 ```{r}
 # Removing viral infection sample - GSM627045
 filtered_genes <- filtered_genes[, colnames(filtered_genes) != "GSM627045"]
 sampleinfo_new <- sampleinfo_new[rownames(sampleinfo_new) != "GSM627045", ]
 ```
 
+<<<<<<< HEAD
 ### Volcano plot with DE genes in sepsis filtered by FDR < 0.01 and FC > 2
 
 ```{r}
@@ -382,33 +380,70 @@ pheatmap(filtered_genes[rownames(sig_genes), ],
          treeheight_row = 0,              # optional: hide row clustering tree
          border_color = NA,
          color = my_palette)             # set custom color                
+=======
+```{r}
+# PCA
+pca <- prcomp(t(filtered_genes[rownames(sig_genes), ]), scale. = TRUE)
+
+# Compute variance explained
+var_explained <- pca$sdev^2 / sum(pca$sdev^2) * 100
+
+sum(var_explained[1:3])
+# Disease status - Plot PC1 vs PC2 with % variance
+plot(pca$x[,1], pca$x[,2],
+     col = sampleinfo_new$disease_status,
+     pch = 16,
+     xlab = paste0("PC1 (", round(var_explained[1], 1), "%)"),
+     ylab = paste0("PC2 (", round(var_explained[2], 1), "%)"),
+     main = "Supervised PCA after P-value cutoff")
+legend("topright", legend = levels(sampleinfo_new$disease_status), col = 1:length(levels(sampleinfo_new$disease_status)), pch=16)
+>>>>>>> origin/main
 ```
 ### Differentially Expression analysis, adjusting for Birthweight 
 
 ```{r}
-design_1 <- model.matrix(~ 0+ Birthweight + disease_status, data = sampleinfo_new)
+sampleinfo_new$Birthweight_kg <- sampleinfo_new$Birthweight / 1000
+design_1 <- model.matrix(~ 0 + Birthweight_kg, data = sampleinfo_new)
+
 # design
 colnames(design_1)
 ```
 
 ```{r}
 fit3 <- lmFit(filtered_genes, design_1)
-contrast.matrix <- makeContrasts(disease_statusinfected - disease_statuscontrol, levels = design_1)
-fit4 <- contrasts.fit(fit3, contrast.matrix)
-fit4 <- eBayes(fit4)
+# contrast.matrix <- makeContrasts(disease_statusinfected - disease_statuscontrol, levels = design_1)
+# fit4 <- contrasts.fit(fit3, contrast.matrix)
+fit4 <- eBayes(fit3)
 ```
 
 ```{r}
-top_genes_BW <- topTable(fit4, number = Inf, adjust.method = "BH")
+top_genes_BW <- topTable(fit4, coef = 1, number = Inf, adjust.method = "BH")
 head(top_genes_BW)
 ```
 ```{r}
-sum(top_genes_BW$adj.P.Val <= 0.01)
+sum(top_genes_BW$adj.P.Val <= 0.00001)
+sum(top_genes_BW$adj.P.Val <= 0.00001 & abs(top_genes_BW$logFC) >= 2)
 sig_genes_BW <- top_genes_BW %>% filter(adj.P.Val <= 0.01 & abs(logFC) >= log2(1.25))
-dim(sig_genes_BW)
+```
+```{r}
+# PCA
+pca <- prcomp(t(filtered_genes[rownames(sig_genes_BW), ]), scale. = TRUE)
+
+# Compute variance explained
+var_explained <- pca$sdev^2 / sum(pca$sdev^2) * 100
+
+sum(var_explained[1:3])
+# Disease status - Plot PC1 vs PC2 with % variance
+plot(pca$x[,1], pca$x[,2],
+     col = sampleinfo_new$disease_status,
+     pch = 16,
+     xlab = paste0("PC1 (", round(var_explained[1], 1), "%)"),
+     ylab = paste0("PC2 (", round(var_explained[2], 1), "%)"),
+     main = "Supervised PCA after P-value cutoff")
+legend("topright", legend = levels(sampleinfo_new$disease_status), col = 1:length(levels(sampleinfo_new$disease_status)), pch=16)
 ```
 
-### Volcano plot with DE genes in sepsis filtered, adjusting for Birthweight 
+### Volcano plot with DE genes correlated to Birthweight 
 
 ```{r}
 # Add a column to flag significant genes
@@ -421,10 +456,11 @@ ggplot(top_genes_BW, aes(x = logFC, y = -log10(adj.P.Val))) +
   theme_minimal() +
   xlab("Log2 Fold Change") +
   ylab("-Log10 Adjusted P-Value") +
-  ggtitle("Volcano Plot of DE Genes adjusted for Birthweight") +
+  ggtitle("Volcano Plot of Differentially Expressed Genes correlated to Birthweight") +
   geom_vline(xintercept = c(-log2(1.25), log2(1.25)), linetype = "dashed", color = "blue") +
   geom_hline(yintercept = -log10(0.01), linetype = "dashed", color = "blue")
 ```
+<<<<<<< HEAD
 ### Heatmap of significant DE genes in sepsis 
 ```{r}
 # sig_genes_hm <- top_genes %>% filter(adj.P.Val <= 0.01 & abs(logFC) >= log2(2)) 
@@ -505,6 +541,9 @@ sig_genes_BW_2 <- top_genes_BW_2 %>% filter(adj.P.Val <= 0.01)
 ```
 
 #Over-Representation Analysis - DE genes in sepsis vs control adjusted w.r.t BW  
+=======
+### Over-Representation Analysis - BW linearly correlated to total population  
+>>>>>>> origin/main
 
 ```{r}
 sig_genes_ORA <- sig_genes_BW
@@ -541,9 +580,15 @@ go_res <- enrichGO(gene=gene_entrez,
 
 
 ```{r}
+<<<<<<< HEAD
 barplot(reactome_res, showCategory=10, title="Top Reactome Pathways in Sepsis vs control correlated to BW")
 barplot(go_res, showCategory=10, title="GO Biological Process Enrichment in Sepsis vs control correlated to BW")
 barplot(kegg_res, showCategory=10, title="Top KEGG Pathways in Sepsis vs control correlated to BW")
+=======
+barplot(reactome_res, showCategory=10, title="Top Reactome Pathways in Sepsis population linearly correlated to BW")
+barplot(go_res, showCategory=10, title="GO Biological Process Enrichment in Sepsis population linearly correlated to BW")
+barplot(kegg_res, showCategory=10, title="Top KEGG Pathways in Sepsis population linearly correlated to BW")
+>>>>>>> origin/main
 ```
 #Over-Representation Analysis - BW linearly correlated to sepsis population  
 
@@ -634,9 +679,134 @@ print("newline")
 ```
 
 
-Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+```{r}
+# ===============================
+# Script: Extract Human Innate Immune System Pathways & Genes
+# ===============================
+# ---- 1. Convert enrichResult to data frame ----
+reactome_df <- as.data.frame(reactome_res)
 
-When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+# ---- 2. Convert Reactome pathways to proper data frame ----
+all_pathways_list <- as.list(reactomePATHID2NAME)
 
-The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+all_pathways_df <- data.frame(
+  PATHID = names(all_pathways_list),         # pathway IDs
+  PATHNAME = unlist(all_pathways_list),      # pathway names
+  stringsAsFactors = FALSE
+)
+# ---- 3. Define keywords for innate immune system ----
+keywords <- c(
+  "innate immune system",
+  "toll-like receptor",
+  "cytokine",
+  "pattern recognition receptor",
+  "interferon",
+  "neutrophil",
+  "dendritic",
+  "NF-kappaB", 
+  "inflammasome", 
+  "NOD",
+  "chemokines"
+)
+
+# ---- 4. Identify all relevant pathways ----
+# Only keep pathways whose names match the keywords
+innate_hierarchy <- all_pathways_df %>%
+  filter(grepl(paste(keywords, collapse = "|"), PATHNAME, ignore.case = TRUE))
+
+# Only consider pathways that are in human enrichment results
+innate_pathway_ids <- intersect(innate_hierarchy$PATHID, reactome_df$ID)
+
+# ---- 5. Filter enrichment results for innate immune system pathways ----
+innate_df <- reactome_df %>%
+  filter(ID %in% innate_pathway_ids)
+innate_df <- innate_df %>% filter(innate_df$Description != "Mitotic Telophase/Cytokinesis")
+# ---- 6. Extract genes ----
+# Each pathway has genes separated by "/"
+innate_genes <- unique(unlist(strsplit(innate_df$geneID, "/")))
+
+# ---- 7. Optional: Create pathway → gene mapping ----
+innate_pathway_genes <- innate_df %>%
+  select(Description, geneID) %>%
+  mutate(Genes = strsplit(geneID, "/")) %>%
+  select(-geneID)
+
+# ---- 8. Output summary ----
+cat("Number of enriched human innate immune system pathways:", nrow(innate_df), "\n")
+cat("Number of unique genes in these pathways:", length(innate_genes), "\n")
+
+# ---- 9. Results ----
+# Pathway enrichment table
+innate_df
+
+# Unique genes
+innate_genes
+
+# Pathway-to-gene mapping
+innate_pathway_genes
+```
+```{r}
+library(dplyr)
+
+# Filter the pathway in your innate_df
+neutrophil_pathway <- innate_df %>%
+  filter(grepl("neutrophil degranulation", Description, ignore.case = TRUE))
+
+# Extract gene symbols
+neutrophil_genes <- unique(unlist(strsplit(neutrophil_pathway$geneID, "/")))
+
+head(neutrophil_genes)
+```
+```{r}
+# Assuming expr_mat has gene symbols as rownames
+expr_neusubset <- filtered_genes[rownames(filtered_genes) %in% neutrophil_genes, ]
+
+# Match the order of columns in expr_neusubset
+colnames(expr_neusubset) <- sampleinfo_new[colnames(expr_neusubset), "title"]
+# Check
+head(expr_neusubset)
+```
+
+```{r}
+# Pick top 100 most sig genes
+sig_genes_BW <- sig_genes_BW[!grepl("^ILMN_", rownames(sig_genes_BW)), ]
+# Convert rownames to a column
+sig_genes_clean <- sig_genes_BW %>%
+  rownames_to_column(var = "Gene")
+
+# Keep only genes present in your neutrophil list
+neutro_sig <- sig_genes_clean %>%
+  filter(Gene %in% neutrophil_genes)
+
+#Top 20 neutrophil related genes
+top_neutro_genes <- neutro_sig %>%
+  mutate(absLogFC = abs(logFC)) %>%
+  arrange(desc(absLogFC)) %>%
+  slice(1:10) %>%
+  pull(Gene)
+
+expr_subset_sig <- expr_neusubset[
+  rownames(expr_neusubset) %in% top_neutro_genes, 
+]
+
+expr_long <- as.data.frame(expr_subset_sig) %>%
+  rownames_to_column("Gene") %>%
+  pivot_longer(
+    cols = -Gene,
+    names_to = "Sample",
+    values_to = "Expression"
+  )
+
+ggplot(expr_long, aes(x = Sample, y = Expression, color = Gene, group = Gene)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(
+    title = "Top 20 Neutrophil DE Genes (by |logFC|)",
+    x = "Sample",
+    y = "Normalized Expression"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
 
